@@ -37,18 +37,26 @@ export type SlackRequestBody = EventsAPIBody | { payload: string };
 type ConstructorOptions = {|
   accessToken?: string,
   client?: SlackOAuthClient,
+  mapTeamToAccessToken?: (teamId: string) => Promise<string>,
   verificationToken?: string,
 |};
 
 export default class SlackConnector implements Connector<SlackRequestBody> {
   _client: SlackOAuthClient;
 
+  _mapTeamToAccessToken: ?(teamId: string) => ?Promise<string>;
+
   _verificationToken: string;
 
-  constructor({ accessToken, client, verificationToken }: ConstructorOptions) {
+  constructor({
+    accessToken,
+    client,
+    mapTeamToAccessToken,
+    verificationToken,
+  }: ConstructorOptions) {
     this._client = client || SlackOAuthClient.connect(accessToken);
     this._verificationToken = verificationToken || '';
-
+    this._mapTeamToAccessToken = mapTeamToAccessToken;
     if (!this._verificationToken) {
       warning(
         false,
@@ -121,6 +129,17 @@ export default class SlackConnector implements Connector<SlackRequestBody> {
       return;
     }
 
+    let customAccessToken;
+    if (this._mapTeamToAccessToken != null) {
+      const mapTeamToAccessToken = this._mapTeamToAccessToken; // TODO
+      const teamId = body['team_id']; // eslint-disable-line
+      if (!teamId) {
+        warning(false, 'Could not find teamId from request body.');
+      } else {
+        customAccessToken = await mapTeamToAccessToken(teamId);
+      }
+    }
+
     const rawEvent = this._getRawEventFromRequest(body);
     let userFromBody;
     if (rawEvent.type === 'interactive_message') {
@@ -145,7 +164,9 @@ export default class SlackConnector implements Connector<SlackRequestBody> {
     }
 
     const promises: Object = {
-      sender: this._client.getUserInfo(senderId),
+      sender: this._client.getUserInfo(senderId, {
+        token: customAccessToken,
+      }),
     };
 
     // TODO: check join or leave events?
@@ -155,9 +176,14 @@ export default class SlackConnector implements Connector<SlackRequestBody> {
         Array.isArray(session.channel.members) &&
         session.channel.members.indexOf(senderId) < 0)
     ) {
-      promises.channel = this._client.getConversationInfo(channelId);
+      promises.channel = this._client.getConversationInfo(channelId, {
+        token: customAccessToken,
+      });
       promises.channelMembers = this._client.getAllConversationMembers(
-        channelId
+        channelId,
+        {
+          token: customAccessToken,
+        }
       );
     }
 
@@ -169,7 +195,9 @@ export default class SlackConnector implements Connector<SlackRequestBody> {
         Array.isArray(session.team.members) &&
         session.team.members.indexOf(senderId) < 0)
     ) {
-      promises.allUsers = this._client.getAllUserList();
+      promises.allUsers = this._client.getAllUserList({
+        token: customAccessToken,
+      });
     }
 
     const results = await pProps(promises);
@@ -230,15 +258,31 @@ export default class SlackConnector implements Connector<SlackRequestBody> {
     return [new SlackEvent(rawEvent)];
   }
 
-  createContext(params: {
+  async createContext(params: {
     event: SlackEvent,
     session: ?Session,
     initialState: ?Object,
     requestContext: ?Object,
   }): SlackContext {
+    let customAccessToken;
+    if (this._mapTeamToAccessToken) {
+      const { user } = params.session;
+      let teamId = null;
+      if (user && user.team_id) {
+        teamId = user.team_id // eslint-disable-line
+      }
+
+      if (!teamId) {
+        warning(false, 'Could not find teamId from request body.');
+      } else {
+        customAccessToken = await this._mapTeamToAccessToken(teamId);
+      }
+    }
     return new SlackContext({
       ...params,
       client: this._client,
+      token: customAccessToken,
+      accessToken: customAccessToken, // TODO ?
     });
   }
 
